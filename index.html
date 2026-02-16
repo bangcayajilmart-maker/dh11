@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>ESP32 Smart Environment Dashboard</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+
+<body class="bg-gradient-to-br from-gray-900 to-black text-white min-h-screen p-6">
+
+  <h1 class="text-3xl font-bold mb-6">ESP32 Smart Environment Dashboard</h1>
+
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+
+    <!-- LED CONTROLS -->
+    <div>
+      <h2 class="mb-2 font-semibold">Device Control</h2>
+      <div id="ledControls" class="space-y-2"></div>
+      <p id="ledMsg" class="text-xs text-green-400 mt-1"></p>
+    </div>
+
+    <!-- CENTER -->
+    <div class="md:col-span-2 space-y-4">
+
+      <!-- CURRENT DATA CARD -->
+      <div class="bg-slate-900 p-4 rounded-2xl text-center">
+        <p class="text-xs text-gray-400">Current Reading</p>
+        <div class="flex justify-center gap-10 mt-2">
+          <div class="text-orange-400 text-4xl font-bold" id="currentTemp">-- °C</div>
+          <div class="text-blue-400 text-4xl font-bold" id="currentHum">-- %</div>
+        </div>
+        <p class="text-xs text-gray-500 mt-2" id="currentTime">--</p>
+      </div>
+
+      <!-- GRAPH -->
+      <div class="bg-slate-900 p-4 rounded-2xl">
+        <div class="flex gap-2 mb-3">
+          <input type="date" id="date" class="text-black px-2 py-1 rounded">
+          <button id="apply" class="bg-green-600 px-3 rounded">Apply</button>
+          <button id="clear" class="bg-red-600 px-3 rounded">Clear</button>
+        </div>
+        <canvas id="chart"></canvas>
+        <p class="text-xs text-gray-400 mt-2">Average per minute</p>
+      </div>
+
+    </div>
+
+    <!-- DETAILS -->
+    <div class="bg-slate-900 p-4 rounded-2xl overflow-y-auto max-h-[520px]">
+      <div class="flex justify-between items-center mb-2">
+        <h2 class="font-semibold text-sm">Detailed Logs (10s interval)</h2>
+        <select id="rowLimit" class="text-black text-xs rounded px-1">
+          <option value="10">10 rows</option>
+          <option value="25">25 rows</option>
+          <option value="50">50 rows</option>
+          <option value="100">100 rows</option>
+        </select>
+      </div>
+
+      <div class="grid grid-cols-4 text-xs font-bold border-b border-slate-600 pb-1 mb-1">
+        <span>Date</span><span>Time</span><span>Temp</span><span>Hum</span>
+      </div>
+
+      <div id="details"></div>
+    </div>
+
+  </div>
+
+  <!-- ================= SCRIPT ================= -->
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js";
+    import { getDatabase, ref, onValue, set } from "https://www.gstatic.com/firebasejs/9.23.0/firebase-database.js";
+
+    /* ===== FIREBASE CONFIG ===== */
+    const firebaseConfig = {
+      apiKey: "AIzaSyA8ShwmYwZHjz0aq8wxFnSngcyDpr4T0p0",
+      databaseURL: "https://jilmartpbangcaya-default-rtdb.asia-southeast1.firebasedatabase.app"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    /* ===== STATE ===== */
+    let selectedDate = null;
+    let rowLimit = 10;
+    let cachedData = null;
+
+    /* ===== LED CONTROLS ===== */
+    const ledBox = document.getElementById("ledControls");
+    const ledMsg = document.getElementById("ledMsg");
+
+    for (let i = 1; i <= 5; i++) {
+      const div = document.createElement("div");
+      div.className = "flex justify-between items-center bg-slate-800 p-3 rounded-xl";
+      div.innerHTML = `
+        <span class="text-sm">LED ${i}</span>
+        <input type="checkbox" id="led${i}" class="w-5 h-5 accent-green-500">
+      `;
+      ledBox.appendChild(div);
+
+      // FIXED EVENT LISTENER
+      div.querySelector(`#led${i}`).addEventListener("change", async e => {
+        try {
+          await set(ref(db, `leds/LED${i}`), e.target.checked ? 1 : 0);
+          ledMsg.textContent = `LED${i} updated successfully!`;
+          setTimeout(() => (ledMsg.textContent = ""), 2000);
+        } catch (err) {
+          console.error("LED write failed", err);
+          ledMsg.textContent = `Failed to update LED${i}`;
+        }
+      });
+    }
+
+    onValue(ref(db, "leds"), snap => {
+      const v = snap.val();
+      if (!v) return;
+      for (let i = 1; i <= 5; i++) {
+        document.getElementById(`led${i}`).checked = !!v[`LED${i}`];
+      }
+    });
+
+    /* ===== CURRENT CARD ===== */
+    const currentTemp = document.getElementById("currentTemp");
+    const currentHum = document.getElementById("currentHum");
+    const currentTime = document.getElementById("currentTime");
+
+    /* ===== CHART ===== */
+    const ctx = document.getElementById("chart").getContext("2d");
+    const chart = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels: [],
+        datasets: [
+          { label: "Temperature (°C)", data: [], borderColor: "#ff5722", borderWidth: 2 },
+          { label: "Humidity (%)", data: [], borderColor: "#2196f3", borderWidth: 2 }
+        ]
+      },
+      options: {
+        responsive: true,
+        scales: { y: { beginAtZero: true } }
+      }
+    });
+
+    /* ===== FILTER EVENTS ===== */
+    document.getElementById("apply").onclick = () => {
+      selectedDate = document.getElementById("date").value || null;
+      render();
+    };
+
+    document.getElementById("clear").onclick = () => {
+      selectedDate = null;
+      document.getElementById("date").value = "";
+      render();
+    };
+
+    document.getElementById("rowLimit").onchange = e => {
+      rowLimit = Number(e.target.value);
+      render();
+    };
+
+    /* ===== DATA LISTENER ===== */
+    onValue(ref(db, "/"), snap => {
+      cachedData = snap.val();
+      render();
+    });
+
+    /* ===== AUTO REFRESH (10s) ===== */
+    setInterval(() => {
+      if (cachedData) render();
+    }, 10000);
+
+    /* ===== RENDER FUNCTION ===== */
+    function render() {
+      if (!cachedData) return;
+
+      chart.data.labels = [];
+      chart.data.datasets[0].data = [];
+      chart.data.datasets[1].data = [];
+      document.getElementById("details").innerHTML = "";
+
+      const minuteBuckets = {};
+      const detailed = [];
+      let latest = null;
+
+      for (const date in cachedData) {
+        if (date === "leds") continue;
+        if (selectedDate && date !== selectedDate) continue;
+
+        for (const h in cachedData[date]) {
+          for (const m in cachedData[date][h]) {
+            let tSum = 0, hSum = 0, c = 0;
+
+            for (const s in cachedData[date][h][m]) {
+              const e = cachedData[date][h][m][s];
+              if (!e.temperature) continue;
+
+              latest = { date, time: `${h}:${m}:${s}`, ...e };
+
+              tSum += e.temperature;
+              hSum += e.humidity;
+              c++;
+
+              detailed.push({
+                date,
+                time: `${h.replace("h_", "")}:${m.replace("m", "")}:${s.replace("s", "")}`,
+                t: e.temperature,
+                h: e.humidity
+              });
+            }
+
+            if (c) {
+              minuteBuckets[`${date} ${h}:${m}`] = {
+                t: tSum / c,
+                h: hSum / c
+              };
+            }
+          }
+        }
+      }
+
+      /* CURRENT */
+      if (latest) {
+        currentTemp.textContent = `${latest.temperature} °C`;
+        currentHum.textContent = `${latest.humidity} %`;
+        currentTime.textContent = `${latest.date} ${latest.time}`;
+      }
+
+      /* GRAPH */
+      Object.entries(minuteBuckets).slice(-30).forEach(([k, v]) => {
+        chart.data.labels.push(k.split(" ")[1]);
+        chart.data.datasets[0].data.push(v.t.toFixed(1));
+        chart.data.datasets[1].data.push(v.h.toFixed(1));
+      });
+      chart.update();
+
+      /* DETAILS */
+      detailed.slice(-rowLimit).reverse().forEach(r => {
+        document.getElementById("details").innerHTML += `
+          <div class="grid grid-cols-4 text-xs border-b border-slate-700 py-1">
+            <span>${r.date}</span>
+            <span>${r.time}</span>
+            <span>${r.t}°C</span>
+            <span>${r.h}%</span>
+          </div>
+        `;
+      });
+    }
+  </script>
+
+</body>
+</html>
